@@ -44,9 +44,7 @@ def train_one_epoch(
             samples[i] = samples[i].to(device, non_blocking=True)
 
         with torch.autocast("cuda", enabled=False):
-            loss = model(
-                samples, mmt, epoch < args.start_rectify_epoch, args.singular_thresh
-            )
+            loss = model(samples, mmt, epoch < args.start_rectify_epoch, args.singular_thresh)
 
         loss_value = loss.item()
         if not math.isfinite(loss_value):
@@ -64,7 +62,7 @@ def train_one_epoch(
     # gather the stats from all processes
     if args.print_this_epoch:
         print("Averaged stats:", metric_logger)
-        eval_result = evaluate(model, data_loader_test, device, epoch, args)
+        eval_result = evaluate(model, data_loader_test, device, args)
     else:
         eval_result = None
     return eval_result
@@ -74,14 +72,11 @@ def evaluate(
     model: BaseModel,
     data_loader_test: DataLoader,
     device: torch.device,
-    epoch: int,
     args=None,
 ):
     model.eval()
     with torch.no_grad():
-        features_all = torch.zeros(args.n_views, args.n_sample, args.embed_dim).to(
-            device
-        )
+        features_all = torch.zeros(args.n_views, args.n_sample, args.embed_dim).to(device)
         labels_all = torch.zeros(args.n_sample, dtype=torch.long).to(device)
         for indexs, samples, labels, label2, id1, id2 in data_loader_test:
             for i in range(args.n_views):

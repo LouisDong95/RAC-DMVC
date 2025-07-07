@@ -13,7 +13,7 @@ import utils
 import yaml
 from dataset_loader import load_dataset
 from engine_train import train_one_epoch
-from model import BaseModel, DivideModel, OursModel
+from model import BaseModel, DivideModel, CandyModel
 from torch.utils import data
 
 warnings.filterwarnings("ignore")
@@ -51,7 +51,7 @@ def get_args_parser():
         default="standard",
         choices=["standard", "min-max", "l2-norm"],
     )
-    parser.add_argument("--train_time", type=int, default=5)
+    parser.add_argument("--train_time", type=int, default=1)
 
     # optimizer parameters
     parser.add_argument(
@@ -73,15 +73,15 @@ def get_args_parser():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="LandUse21",
+        default="Scene15",
         choices=[
             "LandUse21",
             "Scene15",
         ],
     )
-    parser.add_argument("--missing_rate", type=float, default=0.0)
+    parser.add_argument("--missing_rate", type=float, default=0.5)
     parser.add_argument(
-        "--data_path", type=str, default="./", help="path to your folder of dataset"
+        "--data_path", type=str, default="../../Datasets/Multi_View/", help="path to your folder of dataset"
     )
     parser.add_argument(
         "--device", default="cuda", help="device to use for training / testing"
@@ -93,7 +93,7 @@ def get_args_parser():
         help="path where to save, empty for no saving",
     )
 
-    parser.add_argument("--print_freq", default=50)
+    parser.add_argument("--print_freq", default=10)
 
     parser.add_argument(
         "--start_epoch", default=0, type=int, metavar="N", help="start epoch"
@@ -108,7 +108,8 @@ def get_args_parser():
     parser.add_argument("--no_pin_mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
 
-    parser.add_argument("--fp_ratio", type=float, default=0.5)
+    parser.add_argument("--fp_ratio", type=float, default=0.0)
+    parser.add_argument("--noise_ratio", type=float, default=0.5)
     parser.add_argument("--use_divide", action="store_true")
     parser.add_argument("--save_ckpt", action="store_true")
 
@@ -135,7 +136,6 @@ def train_one_time(args, state_logger):
         dataset_train,
         sampler=sampler_train,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
     )
@@ -143,7 +143,6 @@ def train_one_time(args, state_logger):
         dataset_test,
         sampler=sampler_test,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
     )
@@ -157,7 +156,7 @@ def train_one_time(args, state_logger):
             drop_rate=args.drop_rate,
         )
     else:
-        model = OursModel(
+        model = CandyModel(
             n_views=args.n_views,
             layer_dims=args.encoder_dim,
             temperature=args.temperature,
@@ -276,8 +275,6 @@ if __name__ == "__main__":
         args.update(configs)
         args = argparse.Namespace(**args)
 
-    EXPERIMENT_ROOT = os.environ["EXPERIMENT_ROOT"]
-    args.data_path = os.path.join(EXPERIMENT_ROOT, "data/multiview")
     folder_name = "_".join(
         [
             args.dataset,
@@ -292,7 +289,7 @@ if __name__ == "__main__":
         ]
     )
 
-    args.output_dir = os.path.join(EXPERIMENT_ROOT, "run/CANDY", folder_name)
+    args.output_dir = os.path.join(args.output_dir, folder_name)
     print(f"Output dir: {args.output_dir}")
 
     args.embed_dim = args.encoder_dim[0][-1]

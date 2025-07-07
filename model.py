@@ -69,23 +69,6 @@ class BaseModel(torch.nn.Module):
 
 
 class DivideModel(BaseModel):
-    def forward_impl(self, data, momentum, warm_up):
-        self._update_target_branch(momentum)
-        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
-        p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
-
-        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
-        if warm_up:
-            mp = torch.eye(z[0].shape[0]).cuda()
-            mp = [mp, mp]
-        else:
-            mp = [self.kernel_affinity(z_t[i]) for i in range(self.n_views)]
-        l_inter = (self.cl(p[0], z_t[1], mp[1]) + self.cl(p[1], z_t[0], mp[0])) / 2
-        l_intra = (self.cl(z[0], z_t[0], mp[0]) + self.cl(z[1], z_t[1], mp[1])) / 2
-        loss = l_inter + l_intra
-
-        return loss
-
     @torch.no_grad()
     def kernel_affinity(self, z, temperature=0.1, step: int = 5):
         z = L2norm(z)
@@ -98,8 +81,25 @@ class DivideModel(BaseModel):
         G = torch.eye(G.shape[0]).cuda() * alpha + G * (1 - alpha)
         return G
 
+    def forward_impl(self, data, momentum, warm_up, singular_thresh):
+        self._update_target_branch(momentum)
+        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
+        p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
+        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
 
-class OursModel(BaseModel):
+        if warm_up:
+            mp = torch.eye(z[0].shape[0]).cuda()
+            mp = [mp, mp]
+        else:
+            mp = [self.kernel_affinity(z_t[i]) for i in range(self.n_views)]
+        l_inter = (self.cl(p[0], z_t[1], mp[1]) + self.cl(p[1], z_t[0], mp[0])) / 2
+        l_intra = (self.cl(z[0], z_t[0], mp[0]) + self.cl(z[1], z_t[1], mp[1])) / 2
+        loss = l_inter + l_intra
+
+        return loss
+
+
+class CandyModel(BaseModel):
     @torch.no_grad()
     def robust_affinity(self, z1, z2, t=0.07):
         G_intra, G_inter = [], []
@@ -131,7 +131,6 @@ class OursModel(BaseModel):
         self._update_target_branch(momentum)
         z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
-
         z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
 
         if warm_up:
@@ -147,7 +146,6 @@ class OursModel(BaseModel):
                     id_loss += self.ncl(
                         z[i],
                         z_t[i],
-                        # mp_intra[i],
                         mp_intra[i].mm(mp_intra[j].t()),
                         association=(i, j),
                         singular_thresh=singular_thresh,
@@ -156,7 +154,6 @@ class OursModel(BaseModel):
                     cc_loss += self.ncl(
                         p[i],
                         z_t[j],
-                        # mp_inter[i],
                         mp_inter[i].mm(mp_intra[j].t())
                         + 0.2
                         * torch.eye(mp_inter[i].shape[0], device=mp_inter[i].device),
@@ -175,6 +172,16 @@ class OursModel(BaseModel):
         loss = cc_loss + id_loss
         return loss
 
+
+class NoisyModel(BaseModel):
+    @torch.no_grad()
+    def robust_affinity(self):
+
+    def forward_impl(self, data, momentum, warm_up, singular_thresh):
+        self._update_target_branch(momentum)
+        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
+        p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
+        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
 
 class FCN(nn.Module):
     def __init__(

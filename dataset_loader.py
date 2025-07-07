@@ -13,7 +13,7 @@ def load_mat(args):
     label_y = None
 
     if args.dataset == "Scene15":
-        mat = sio.loadmat(os.path.join(args.data_path, "Scene_15.mat"))
+        mat = sio.loadmat(os.path.join(args.data_path, "Scene15.mat"))
         X = mat["X"][0]
         data_X.append(X[0].astype("float32"))
         data_X.append(X[1].astype("float32"))

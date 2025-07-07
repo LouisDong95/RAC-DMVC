@@ -14,6 +14,6 @@ temperature: 0.5
 blr: 5.0e-4
 min_blr: 5.0e-4
 weight_decay: 0
-data_path: /mount/ruiming/multiview
+
 output_dir: output/NUSWIDE
 seed: 1
