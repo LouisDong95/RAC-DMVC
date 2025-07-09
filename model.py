@@ -31,6 +31,7 @@ class BaseModel(torch.nn.Module):
 
         self.cl = ContrastiveLoss(temperature)
         self.ncl = DenoiseContrastiveLoss(temperature)
+        self.dis = DistillLoss()
         self.feature_dim = [layer_dims[i][-1] for i in range(n_views)]
 
     def forward(self, *args, **kwargs):
@@ -45,7 +46,7 @@ class BaseModel(torch.nn.Module):
                 param_t.data = param_t.data * momentum + param_o.data * (1 - momentum)
 
     @torch.no_grad()
-    def extract_feature(self, data, realign=True):
+    def extract_feature(self, data, mask, realign=True):
         N = data[0].shape[0]
         z = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
 
@@ -81,7 +82,7 @@ class DivideModel(BaseModel):
         G = torch.eye(G.shape[0]).cuda() * alpha + G * (1 - alpha)
         return G
 
-    def forward_impl(self, data, momentum, warm_up, singular_thresh):
+    def forward_impl(self, data, momentum, warm_up, singular_thresh, pseudo_centers):
         self._update_target_branch(momentum)
         z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
@@ -94,40 +95,38 @@ class DivideModel(BaseModel):
             mp = [self.kernel_affinity(z_t[i]) for i in range(self.n_views)]
         l_inter = (self.cl(p[0], z_t[1], mp[1]) + self.cl(p[1], z_t[0], mp[0])) / 2
         l_intra = (self.cl(z[0], z_t[0], mp[0]) + self.cl(z[1], z_t[1], mp[1])) / 2
-        loss = l_inter + l_intra
 
+        l_dist = torch.tensor(0.0).cuda()
+        loss = {'l_intra': l_intra, 'l_inter': l_inter, 'l_dist': l_dist}
         return loss
 
 
 class CandyModel(BaseModel):
     @torch.no_grad()
-    def robust_affinity(self, z1, z2, t=0.07):
+    def robust_affinity(self, p, z, t=0.07):
         G_intra, G_inter = [], []
-        z1 = [L2norm(z1[i]) for i in range(len(z1))]
-        z2 = [L2norm(z2[i]) for i in range(len(z2))]
-        for i in range(len(z1)):
-            for j in range(len(z2)):
+        p = [L2norm(p[i]) for i in range(len(p))]
+        z = [L2norm(z[i]) for i in range(len(z))]
+        for i in range(len(p)):
+            for j in range(len(z)):
                 if i == j:
-                    G = (2 - 2 * (z2[i] @ z2[j].t())).clamp(min=0.0)
+                    G = (2 - 2 * (z[i] @ z[j].t())).clamp(min=0.0)
                     G = torch.exp(-G / t)
 
-                    G[torch.eye(G.shape[0]) > 0] = 1.0
+                    G.fill_diagonal_(1.0)
                     G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
                     G_intra.append(G)
                 else:
-                    G = (2 - 2 * (z1[i] @ z2[j].t())).clamp(min=0.0)
+                    G = (2 - 2 * (p[i] @ z[j].t())).clamp(min=0.0)
                     G = torch.exp(-G / t)
 
-                    G[torch.eye(G.shape[0]) > 0] = (
-                        G[torch.eye(G.shape[0]) > 0]
-                        / G.diag().max().clamp_min(1e-7).detach()
-                    )
+                    G[torch.eye(G.shape[0]) > 0] = (G[torch.eye(G.shape[0]) > 0] / G.diag().max().clamp_min(1e-7).detach())
                     G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
                     G_inter.append(G)
 
         return G_intra, G_inter
 
-    def forward_impl(self, data, momentum, warm_up, singular_thresh):
+    def forward_impl(self, data, momentum, warm_up, singular_thresh, pseudo_centers):
         self._update_target_branch(momentum)
         z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
@@ -169,19 +168,92 @@ class CandyModel(BaseModel):
         self.G_intra = mp_intra
         self.G_inter = mp_inter
 
-        loss = cc_loss + id_loss
+        l_dist = torch.tensor(0.0).cuda()
+        loss = {'l_intra': cc_loss, 'l_inter': id_loss, 'l_dist': l_dist}
         return loss
 
 
 class NoisyModel(BaseModel):
     @torch.no_grad()
-    def robust_affinity(self):
+    def robust_affinity(self, p, z, t=0.07):
+        G_intra, G_inter = [], []
+        p = [L2norm(p[i]) for i in range(len(p))]
+        z = [L2norm(z[i]) for i in range(len(z))]
+        for i in range(len(p)):
+            for j in range(len(z)):
+                if i == j:
+                    G = (2 - 2 * (z[i] @ z[j].t())).clamp(min=0.0)
+                    G = torch.exp(-G / t)
 
-    def forward_impl(self, data, momentum, warm_up, singular_thresh):
+                    G.fill_diagonal_(1.0)
+                    G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
+                    G_intra.append(G)
+                else:
+                    G = (2 - 2 * (p[i] @ z[j].t())).clamp(min=0.0)
+                    G = torch.exp(-G / t)
+
+                    G.fill_diagonal_(1.0)
+                    G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
+                    G_inter.append(G)
+        return G_intra, G_inter
+
+
+    def forward_impl(self, data, momentum, warm_up, singular_thresh, pseudo_centers):
         self._update_target_branch(momentum)
         z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
         z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
+
+        if warm_up:
+            mp_intra = torch.eye(z[0].shape[0]).cuda()
+            mp_intra = [mp_intra, mp_intra]
+            mp_inter = mp_intra
+            l_dist = torch.tensor(0.0).cuda()
+        else:
+            mp_intra, mp_inter = self.robust_affinity(p, z_t)
+            # l_dist = self.dis(p[0], p[1], pseudo_centers)
+            l_dist = torch.tensor(0.0).cuda()
+
+        l_intra = (self.cl.noisy_contrastive(z[0], z_t[0], mp_intra[0]) + self.cl.noisy_contrastive(z[1], z_t[1], mp_intra[1])) / 2
+        l_inter = (self.cl.noisy_contrastive(p[0], z_t[1], mp_inter[0]) + self.cl.noisy_contrastive(p[1], z_t[0], mp_inter[1])) / 2
+
+        loss = {'l_intra': l_intra, 'l_inter': l_inter, 'l_dist': l_dist}
+        return loss
+
+    @torch.no_grad()
+    def extract_feature(self, data, mask):
+        N = data[0].shape[0]
+        z = [torch.zeros(N, self.feature_dim[i]).cuda() for i in range(self.n_views)]
+        for i in range(self.n_views):
+            z[i][mask[:, i]] = self.target_encoder[i](data[i][mask[:, i]])
+
+        # prediction
+        for i in range(self.n_views):
+            z[i][~mask[:, i]] = self.cross_view_decoder[1 - i](z[1 - i][~mask[:, i]])
+
+        # # high
+        # for i in range(self.n_views):
+        #     G_local = self.kernel(z[i][mask[:, i]], z[i][mask[:, i]], flag=True)
+        #     G_cross = self.kernel(z[1-i][~mask[:, i]], z[i][mask[:, i]], flag=False)
+        #     z[i][~mask[:, i]] = G_cross @ G_local @ self.cross_view_decoder[1-i](z[1-i][mask[:, i]])
+
+        z = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
+        z = [L2norm(z[i]) for i in range(self.n_views)]
+
+        return z
+
+    @torch.no_grad()
+    def kernel(self, p, z, t=0.07, flag=False):
+        p = L2norm(p)
+        z = L2norm(z)
+        G = (2 - 2 * (p @ z.t())).clamp(min=0.0)
+        G = torch.exp(-G / t)
+        if flag:
+            G.fill_diagonal_(1.0)
+        G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
+        return G
+
+
 
 class FCN(nn.Module):
     def __init__(
@@ -231,7 +303,7 @@ class MLP(nn.Module):
 
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, temperature=1.0):
+    def __init__(self, temperature=0.5):
         super(ContrastiveLoss, self).__init__()
         self.temperature = temperature
 
@@ -244,8 +316,26 @@ class ContrastiveLoss(nn.Module):
         similarity = torch.div(torch.matmul(x_q, x_k.T), self.temperature)
         similarity = -torch.log(torch.softmax(similarity, dim=1))
         nll_loss = similarity * mask_pos / mask_pos.sum(dim=1, keepdim=True)
-        loss = nll_loss.mean()
+        loss = nll_loss.sum() / N
+        # loss = nll_loss.mean()
         return loss
+
+    def noisy_contrastive(self, x_q, x_k, mask_pos=None):
+        x_q = L2norm(x_q)
+        x_k = L2norm(x_k)
+        N = x_q.shape[0]
+        if mask_pos is None:
+            mask_pos = torch.eye(N).cuda()
+
+        logits = torch.matmul(x_q, x_k.T) / self.temperature
+        logit_pos = (logits * mask_pos).sum(dim=1, keepdim=True)
+        mask_neg = 1.0 - mask_pos
+
+        exp_logits = torch.exp(logits) * mask_neg
+        denom = exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+        loss = -torch.log(torch.exp(logit_pos) /  denom)
+        return loss.mean()
 
 
 class DenoiseContrastiveLoss(nn.Module):
@@ -270,7 +360,7 @@ class DenoiseContrastiveLoss(nn.Module):
             x_q, x_k, mask_pos, self.temperature, association, singular_thresh
         )
 
-        return loss
+        return loss/N
 
 
 def denoise_contrastive_loss(
@@ -299,5 +389,24 @@ def denoise_contrastive_loss(
 
     nll_loss = L * logp
 
-    loss = nll_loss.mean()
+    loss = nll_loss.sum()
     return loss
+
+class DistillLoss(nn.Module):
+    def __init__(self, temperature=0.5):
+        super().__init__()
+        self.temperature = temperature
+    def forward(self, p_s, p_t, center):
+        center = F.normalize(center, dim=-1)
+        p_s = F.normalize(p_s, dim=-1)
+        p_t = F.normalize(p_t, dim=-1)
+        logits_s = p_s@center.t()/self.temperature
+        logits_t = p_t@center.t()/self.temperature
+        probs_s = F.softmax(logits_s, dim=-1).mean(0)
+        probs_t = F.softmax(logits_t, dim=-1).mean(0)
+        loss_uniform = (torch.sum(probs_s * torch.log(probs_s + 1e-8)) + torch.sum(probs_t * torch.log(probs_t + 1e-8)))/2
+
+        p_s = F.log_softmax(p_s@center.t()/self.temperature, dim=-1)
+        p_t = F.log_softmax(p_t@center.t()/self.temperature, dim=-1)
+        loss = F.kl_div(p_s, p_t, reduction='batchmean', log_target=True) * self.temperature ** 2
+        return loss_uniform

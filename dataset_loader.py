@@ -1,11 +1,11 @@
 import os.path
-
 import numpy as np
 import scipy.io as sio
 import sklearn.preprocessing as skp
 import torch
 from numpy.random import randint
 from scipy import sparse
+from sklearn.preprocessing import OneHotEncoder
 
 
 def load_mat(args):
@@ -64,30 +64,37 @@ def load_mat(args):
         for i in range(args.n_views):
             data_X[i] = skp.minmax_scale(data_X[i])
 
-    # Control the randomness of the data
-    rng = np.random.RandomState(1234)
+    # # Control the randomness of the data
+    # rng = np.random.RandomState(1234)
+    #
+    # label_y_view2 = label_y.copy()
+    # id1 = np.arange(data_X[0].shape[0])
+    # id2 = id1.copy()
+    # if args.fp_ratio > 0:
+    #     for i in range(1, args.n_views):
+    #         inx = np.arange(data_X[i].shape[0])
+    #         rng.shuffle(inx)
+    #         inx = inx[0 : int(args.fp_ratio * data_X[i].shape[0])]
+    #         _inx = np.array(inx)
+    #         rng.shuffle(_inx)
+    #         data_X[i][inx] = data_X[i][_inx]
+    #         label_y_view2[inx] = label_y_view2[_inx]
+    #         id2[inx] = id1[_inx]
 
-    label_y_view2 = label_y.copy()
-    id1 = np.arange(data_X[0].shape[0])
-    id2 = id1.copy()
-    if args.fp_ratio > 0:
-        for i in range(1, args.n_views):
-            inx = np.arange(data_X[i].shape[0])
-            rng.shuffle(inx)
-            inx = inx[0 : int(args.fp_ratio * data_X[i].shape[0])]
-            _inx = np.array(inx)
-            rng.shuffle(_inx)
-            data_X[i][inx] = data_X[i][_inx]
-            label_y_view2[inx] = label_y_view2[_inx]
-            id2[inx] = id1[_inx]
-
+    # add noise
     args.n_sample = data_X[0].shape[0]
-    return data_X, label_y, label_y_view2, id1, id2
+    n_ones = int(args.n_sample * args.noise_ratio)
+    mask = np.array([1] * n_ones + [0] * (args.n_sample - n_ones)).reshape(-1,1)
+    np.random.shuffle(mask)
+    noise = np.random.randn(*data_X[1].shape)
+    data_X[1] += noise * mask
+
+    return data_X, label_y
 
 
 def load_dataset(args):
-    data, label1, label2, id1, id2 = load_mat(args)
-    dataset = MultiviewDataset(args.n_views, data, label1, label2, id1, id2)
+    data, targets = load_mat(args)
+    dataset = IncompleteMultiviewDataset(args.n_views, data, targets, args.missing_rate)
     return dataset
 
 
@@ -113,3 +120,99 @@ class MultiviewDataset(torch.utils.data.Dataset):
         id1 = torch.tensor(self.id1[idx], dtype=torch.long)
         id2 = torch.tensor(self.id2[idx], dtype=torch.long)
         return idx, data, label1, label2, id1, id2
+
+
+class IncompleteMultiviewDataset(torch.utils.data.Dataset):
+    def __init__(self, n_views, data_X, label_y, missing_rate):
+        super(IncompleteMultiviewDataset, self).__init__()
+        self.n_views = n_views
+        self.data = data_X
+        self.targets = label_y - np.min(label_y)
+
+        self.missing_mask = torch.from_numpy(self._get_mask(n_views, self.data[0].shape[0], missing_rate)).bool()
+
+    def __len__(self):
+        return self.data[0].shape[0]
+
+    def __getitem__(self, idx):
+        data = []
+        for i in range(self.n_views):
+            data.append(torch.tensor(self.data[i][idx].astype('float32')))
+        label = torch.tensor(self.targets[idx], dtype=torch.long)
+        mask = self.missing_mask[idx]
+        return idx, data, mask, label
+
+    @staticmethod
+    def _get_mask(view_num, alldata_len, missing_rate):
+        """Randomly generate incomplete data information, simulate partial view data with complete view data
+        :param view_num:view number
+        :param alldata_len:number of samples
+        :param missing_rate:Defined in section 4.1 of the paper
+        :return: mask
+        """
+        full_matrix = np.ones((int(alldata_len * (1 - missing_rate)), view_num))
+
+        alldata_len = alldata_len - int(alldata_len * (1 - missing_rate))
+        missing_rate = 0.5
+        if alldata_len != 0:
+            one_rate = 1.0 - missing_rate
+            if one_rate <= (1 / view_num):
+                enc = OneHotEncoder()  # n_values=view_num
+                view_preserve = enc.fit_transform(randint(0, view_num, size=(alldata_len, 1))).toarray()
+                full_matrix = np.concatenate([view_preserve, full_matrix], axis=0)
+                choice = np.random.choice(full_matrix.shape[0], size=full_matrix.shape[0], replace=False)
+                matrix = full_matrix[choice]
+                return matrix
+            error = 1
+            if one_rate == 1:
+                matrix = randint(1, 2, size=(alldata_len, view_num))
+                full_matrix = np.concatenate([matrix, full_matrix], axis=0)
+                choice = np.random.choice(full_matrix.shape[0], size=full_matrix.shape[0], replace=False)
+                matrix = full_matrix[choice]
+                return matrix
+            while error >= 0.005:
+                enc = OneHotEncoder()  # n_values=view_num
+                view_preserve = enc.fit_transform(randint(0, view_num, size=(alldata_len, 1))).toarray()
+                one_num = view_num * alldata_len * one_rate - alldata_len
+                ratio = one_num / (view_num * alldata_len)
+                matrix_iter = (randint(0, 100, size=(alldata_len, view_num)) < int(ratio * 100)).astype(np.int)
+                a = np.sum(((matrix_iter + view_preserve) > 1).astype(np.int))
+                one_num_iter = one_num / (1 - a / one_num)
+                ratio = one_num_iter / (view_num * alldata_len)
+                matrix_iter = (randint(0, 100, size=(alldata_len, view_num)) < int(ratio * 100)).astype(np.int)
+                matrix = ((matrix_iter + view_preserve) > 0).astype(np.int)
+                ratio = np.sum(matrix) / (view_num * alldata_len)
+                error = abs(one_rate - ratio)
+            full_matrix = np.concatenate([matrix, full_matrix], axis=0)
+
+        choice = np.random.choice(full_matrix.shape[0], size=full_matrix.shape[0], replace=False)
+        matrix = full_matrix[choice]
+        return matrix
+
+
+class IncompleteDatasetSampler:
+    def __init__(self, dataset, seed: int = 0, drop_last: bool = False) -> None:
+        self.dataset = dataset
+        self.epoch = 0
+        self.drop_last = drop_last
+        self.seed = seed
+        self.compelte_idx = torch.where(self.dataset.missing_mask.sum(dim=1) == self.dataset.n_views)[0]
+        self.num_samples = self.compelte_idx.shape[0]
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        indices = torch.randperm(self.num_samples, generator=g).tolist()
+
+        indices = self.compelte_idx[indices].tolist()
+
+        assert len(indices) == self.num_samples
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
