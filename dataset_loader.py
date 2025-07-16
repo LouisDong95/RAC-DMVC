@@ -5,54 +5,52 @@ import sklearn.preprocessing as skp
 import torch
 from numpy.random import randint
 from scipy import sparse
-from sklearn.preprocessing import OneHotEncoder
+from torch.utils.data import Dataset
 
 
 def load_mat(args):
     data_X = []
     label_y = None
-
     if args.dataset == "Scene15":
         mat = sio.loadmat(os.path.join(args.data_path, "Scene15.mat"))
         X = mat["X"][0]
         data_X.append(X[0].astype("float32"))
         data_X.append(X[1].astype("float32"))
         label_y = np.squeeze(mat["Y"])
-
     elif args.dataset == "LandUse21":
         mat = sio.loadmat(os.path.join(args.data_path, "LandUse_21.mat"))
         data_X.append(sparse.csr_matrix(mat["X"][0, 1]).A)
         data_X.append(sparse.csr_matrix(mat["X"][0, 2]).A)
-
         label_y = np.squeeze(mat["Y"]).astype("int")
-
     elif args.dataset == "Reuters":
         mat = sio.loadmat(os.path.join(args.data_path, "Reuters_dim10.mat"))
         data_X = []  # 18758 samples
         data_X.append(np.vstack((mat["x_train"][0], mat["x_test"][0])))
         data_X.append(np.vstack((mat["x_train"][1], mat["x_test"][1])))
         label_y = np.squeeze(np.hstack((mat["y_train"], mat["y_test"])))
-
     elif args.dataset == "Caltech101":
-        mat = sio.loadmat(
-            os.path.join(args.data_path, "2view-caltech101-8677sample.mat")
-        )
+        mat = sio.loadmat(os.path.join(args.data_path, "caltech101.mat"))
         X = mat["X"][0]
         data_X.append(X[0].T)
         data_X.append(X[1].T)
         print(X[0].shape, X[1].shape)
         label_y = np.squeeze(mat["gt"]) - 1
-
     elif args.dataset == "NUSWIDE":
-        mat = sio.loadmat(
-            os.path.join(args.data_path, "nuswide_deep_2_view.mat")
-        )
+        mat = sio.loadmat(os.path.join(args.data_path, "nuswide_deep_2_view.mat"))
         data_X.append(mat["Img"])
         data_X.append(mat["Txt"])
         label_y = np.squeeze(mat["label"].T)
-
     else:
         raise KeyError(f"Unknown Dataset {args.dataset}")
+
+    args.n_sample = data_X[0].shape[0]
+    # add noise
+    if args.noise_ratio > 0:
+        n_ones = int(args.n_sample * args.noise_ratio)
+        mask = np.array([1] * n_ones + [0] * (args.n_sample - n_ones)).reshape(-1,1)
+        np.random.shuffle(mask)
+        noise = np.random.randn(*data_X[1].shape)
+        data_X[1] += noise * mask
 
     if args.data_norm == "standard":
         for i in range(args.n_views):
@@ -63,32 +61,6 @@ def load_mat(args):
     elif args.data_norm == "min-max":
         for i in range(args.n_views):
             data_X[i] = skp.minmax_scale(data_X[i])
-
-    # # Control the randomness of the data
-    # rng = np.random.RandomState(1234)
-    #
-    # label_y_view2 = label_y.copy()
-    # id1 = np.arange(data_X[0].shape[0])
-    # id2 = id1.copy()
-    # if args.fp_ratio > 0:
-    #     for i in range(1, args.n_views):
-    #         inx = np.arange(data_X[i].shape[0])
-    #         rng.shuffle(inx)
-    #         inx = inx[0 : int(args.fp_ratio * data_X[i].shape[0])]
-    #         _inx = np.array(inx)
-    #         rng.shuffle(_inx)
-    #         data_X[i][inx] = data_X[i][_inx]
-    #         label_y_view2[inx] = label_y_view2[_inx]
-    #         id2[inx] = id1[_inx]
-
-    # add noise
-    args.n_sample = data_X[0].shape[0]
-    n_ones = int(args.n_sample * args.noise_ratio)
-    mask = np.array([1] * n_ones + [0] * (args.n_sample - n_ones)).reshape(-1,1)
-    np.random.shuffle(mask)
-    noise = np.random.randn(*data_X[1].shape)
-    data_X[1] += noise * mask
-
     return data_X, label_y
 
 
@@ -98,7 +70,7 @@ def load_dataset(args):
     return dataset
 
 
-class MultiviewDataset(torch.utils.data.Dataset):
+class MultiviewDataset(Dataset):
     def __init__(self, n_views, data_X, label1, label2, id1, id2):
         super(MultiviewDataset, self).__init__()
         self.n_views = n_views
@@ -122,7 +94,7 @@ class MultiviewDataset(torch.utils.data.Dataset):
         return idx, data, label1, label2, id1, id2
 
 
-class IncompleteMultiviewDataset(torch.utils.data.Dataset):
+class IncompleteMultiviewDataset(Dataset):
     def __init__(self, n_views, data_X, label_y, missing_rate):
         super(IncompleteMultiviewDataset, self).__init__()
         self.n_views = n_views
@@ -157,7 +129,7 @@ class IncompleteMultiviewDataset(torch.utils.data.Dataset):
         if alldata_len != 0:
             one_rate = 1.0 - missing_rate
             if one_rate <= (1 / view_num):
-                enc = OneHotEncoder()  # n_values=view_num
+                enc = skp.OneHotEncoder()  # n_values=view_num
                 view_preserve = enc.fit_transform(randint(0, view_num, size=(alldata_len, 1))).toarray()
                 full_matrix = np.concatenate([view_preserve, full_matrix], axis=0)
                 choice = np.random.choice(full_matrix.shape[0], size=full_matrix.shape[0], replace=False)
@@ -171,7 +143,7 @@ class IncompleteMultiviewDataset(torch.utils.data.Dataset):
                 matrix = full_matrix[choice]
                 return matrix
             while error >= 0.005:
-                enc = OneHotEncoder()  # n_values=view_num
+                enc = skp.OneHotEncoder()  # n_values=view_num
                 view_preserve = enc.fit_transform(randint(0, view_num, size=(alldata_len, 1))).toarray()
                 one_num = view_num * alldata_len * one_rate - alldata_len
                 ratio = one_num / (view_num * alldata_len)

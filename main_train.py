@@ -1,19 +1,17 @@
 import argparse
 import copy
 import datetime
-import math
 import os
 import time
 import warnings
 from pathlib import Path
-
 import numpy as np
 import torch
 import utils
 import yaml
 from dataset_loader import load_dataset, IncompleteDatasetSampler
 from engine_train import train_one_epoch, evaluate
-from model import BaseModel, DivideModel, CandyModel, NoisyModel
+from model import DivideModel, CandyModel, NoisyModel
 from torch.utils import data
 
 warnings.filterwarnings("ignore")
@@ -65,10 +63,10 @@ def get_args_parser():
     parser.set_defaults(pin_mem=True)
 
     parser.add_argument("--fp_ratio", type=float, default=0.0)
-    parser.add_argument("--noise_ratio", type=float, default=0.8)
+    parser.add_argument("--noise_ratio", type=float, default=0.0)
     parser.add_argument("--missing_rate", type=float, default=0.0)
-    parser.add_argument("--use_divide", action="store_true")
-    parser.add_argument("--use_candy", action="store_true")
+    parser.add_argument("--divide", action="store_true")
+    parser.add_argument("--candy", action="store_true")
     parser.add_argument("--save_ckpt", action="store_true")
 
     parser.add_argument("--singular_thresh", type=float, default=0.2)
@@ -78,40 +76,23 @@ def get_args_parser():
 
 def train_one_time(args, state_logger):
     utils.fix_random_seeds(args.seed)
-
     device = torch.device(args.device)
 
+    # dataset
     dataset = load_dataset(args)
-    dataset_train, dataset_test = dataset, dataset
-
-    sampler_train = IncompleteDatasetSampler(dataset_train, seed=args.seed)
-    sampler_test = torch.utils.data.RandomSampler(dataset_test)
-
+    sampler_train = IncompleteDatasetSampler(dataset, seed=args.seed)
     if args.batch_size > len(sampler_train):
         args.batch_size = len(sampler_train)
+    data_loader_train = torch.utils.data.DataLoader(dataset,sampler=sampler_train,batch_size=args.batch_size,pin_memory=args.pin_mem,drop_last=True)
+    data_loader_test = torch.utils.data.DataLoader(dataset,batch_size=args.batch_size,shuffle=False,pin_memory=args.pin_mem,drop_last=False)
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        sampler=sampler_train,
-        batch_size=args.batch_size,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-    data_loader_test = torch.utils.data.DataLoader(
-        dataset_test,
-        sampler=sampler_test,
-        batch_size=len(sampler_train),
-        pin_memory=args.pin_mem,
-        drop_last=False,
-    )
-
-    if args.use_divide:
+    # models
+    if args.divide:
         model = DivideModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
-    elif args.use_candy:
+    elif args.candy:
         model = CandyModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
     else:
         model = NoisyModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
-
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
@@ -125,7 +106,7 @@ def train_one_time(args, state_logger):
         state_logger.write("Train parameters: {}".format(args).replace(", ", ",\n"))
         state_logger.write(model.__repr__())
         state_logger.write(optimizer.__repr__())
-        print("Data loaded: there are {:} samples.".format(len(dataset_train)))
+        print("Data loaded: there are {:} samples.".format(len(dataset)))
 
     state_logger.write(
         "\n>> Start training {}-th initial, seed: {},".format(args.train_id, args.seed)
@@ -133,15 +114,12 @@ def train_one_time(args, state_logger):
 
     train_state_dict = dict()
 
-    _, pseudo_centers = evaluate(model, data_loader_test, args.device, args)
+    best_acc = 0.
     for epoch in range(args.start_epoch, args.epochs):
-        args.print_this_epoch = (
-            epoch + 1
-        ) % args.print_freq == 0 or epoch + 1 == args.epochs
+        args.print_this_epoch = (epoch + 1) % args.print_freq == 0 or epoch + 1 == args.epochs
+        train_one_epoch(model,data_loader_train,optimizer,device,epoch,args)
+        eval_result = evaluate(model, data_loader_test, device, args)
 
-        train_one_epoch(model,data_loader_train,data_loader_test,optimizer,device,epoch,state_logger,args,pseudo_centers)
-
-        eval_result, pseudo_centers = evaluate(model, data_loader_test, device, args)
         if args.print_this_epoch:
             train_state_dict[epoch] = eval_result
 
@@ -157,6 +135,11 @@ def train_one_time(args, state_logger):
                     eval_result["acc"],
                 )
             )
+
+        if eval_result["acc"] > best_acc:
+            best_acc = eval_result["acc"]
+            best_result = eval_result
+    print(best_result)
     return train_state_dict
 
 

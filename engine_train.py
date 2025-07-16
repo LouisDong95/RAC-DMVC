@@ -8,48 +8,39 @@ from torch.utils.data import DataLoader
 from utils import MetricLogger, SmoothedValue, adjust_learning_config, AverageMeter
 
 
-def train_one_epoch(
-    model: BaseModel,
-    data_loader_train: DataLoader,
-    data_loader_test: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-    state_logger=None,
-    args=None,
-    pseudo_centers = None
-):
+def train_one_epoch(model, data_loader_train, optimizer, device, epoch, args=None):
     metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
-    header = "Epoch: [{}]".format(epoch)
-    print_freq = 50
-
-    data_loader = enumerate(data_loader_train)
 
     model.train(True)
-    optimizer.zero_grad()
-
-    pseudo_centers = torch.from_numpy(pseudo_centers).float().cuda()
-
+    Recon_losses= AverageMeter()
     Intra_losses = AverageMeter()
     Inter_losses = AverageMeter()
     Dist_losses = AverageMeter()
-    for data_iter_step, (ids, samples, mask, _) in data_loader:
+    all_samples = [[] for _ in range(args.n_views)]
+    labels = []
+    # if epoch == args.start_rectify_epoch:
+    #     model.initialize_clustering_layer()
+    for data_iter_step, (ids, samples, mask, label) in enumerate(data_loader_train):
         smooth_epoch = epoch + (data_iter_step + 1) / len(data_loader_train)
         lr = adjust_learning_config(optimizer, smooth_epoch, args)
         mmt = args.momentum
 
         for i in range(args.n_views):
             samples[i] = samples[i].to(device, non_blocking=True)
+            all_samples[i].append(samples[i])
+        labels.append(label.to(device, non_blocking=True))
 
         with torch.autocast("cuda", enabled=False):
-            loss_dict = model(samples, mmt, epoch < args.start_rectify_epoch, args.singular_thresh, pseudo_centers)
+            loss_dict = model(samples, epoch < args.start_rectify_epoch, args.singular_thresh)
 
+        rec_loss = loss_dict['l_rec']
         intra_loss = loss_dict['l_intra']
         inter_loss = loss_dict['l_inter']
         dist_loss = loss_dict['l_dist']
-        total_loss = intra_loss + inter_loss + dist_loss
+        total_loss = rec_loss + intra_loss + inter_loss + dist_loss
 
+        Recon_losses.update(rec_loss.item(), len(ids))
         Intra_losses.update(intra_loss.item(), len(ids))
         Inter_losses.update(inter_loss.item(), len(ids))
         Dist_losses.update(dist_loss.item(), len(ids))
@@ -58,17 +49,18 @@ def train_one_epoch(
         optimizer.step()
         optimizer.zero_grad()
 
+        model.update_target_branch(mmt)
+
     if args.print_this_epoch:
-        log = {'lr': lr, 'Intra_loss': Intra_losses.avg, 'Inter_loss': Inter_losses.avg, 'Dist_loss': Dist_losses.avg}
+        log = {'lr': lr, 'Rec_losses':Recon_losses.avg, 'Intra_loss': Intra_losses.avg, 'Inter_loss': Inter_losses.avg, 'Dist_loss': Dist_losses.avg}
         print(log)
 
+    # update centers
+    all_samples = [torch.cat(all_samples[i], dim=0) for i in range(args.n_views)]
+    model.update_cluster_centers(all_samples, torch.cat(labels, dim=0))
 
-def evaluate(
-    model: BaseModel,
-    data_loader_test: DataLoader,
-    device: torch.device,
-    args=None,
-):
+
+def evaluate(model, data_loader_test, device, args=None):
     model.eval()
     with torch.no_grad():
         features_all = torch.zeros(args.n_views, args.n_sample, args.embed_dim).to(device)
@@ -85,7 +77,7 @@ def evaluate(
 
             labels_all[indexs] = labels
 
-        results = {}
+        # results = {}
         # for i in range(args.n_views):
         #     features_i = F.normalize(features_all[i], dim=-1).cpu().numpy()
         #     kmeans_i = KMeans(n_clusters=args.n_classes, random_state=0).fit(features_i)
@@ -101,4 +93,4 @@ def evaluate(
         nmi, ari, f, acc = utils.evaluate(np.asarray(labels_all.cpu()), kmeans.labels_)
         result = {"nmi": nmi, "ari": ari, "f": f, "acc": acc}
         # print('result_fusion',result)
-    return result, kmeans.cluster_centers_
+    return result
