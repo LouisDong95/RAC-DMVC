@@ -13,6 +13,7 @@ from dataset_loader import load_dataset, IncompleteDatasetSampler
 from engine_train import train_one_epoch, evaluate
 from model import DivideModel, CandyModel, NoisyModel
 from torch.utils import data
+import csv
 
 warnings.filterwarnings("ignore")
 
@@ -28,7 +29,9 @@ def get_args_parser():
     parser.add_argument("--embed_dim", type=int, default=0)
 
     # model parameters
-    parser.add_argument("--temperature", type=float, default=0.5)
+    parser.add_argument("--con_temperature", type=float, default=0.5)
+    parser.add_argument("--dist_temperature", type=float, default=0.5)
+    parser.add_argument("--sigma", type=float, default=0.07)
     parser.add_argument("--start_rectify_epoch", type=int, default=20)
     parser.add_argument("--momentum", type=float, default=0.99)
     parser.add_argument("--drop_rate", type=float, default=0.2)
@@ -37,7 +40,7 @@ def get_args_parser():
 
     # training setting
     parser.add_argument("--batch_size", type=int, default=256, help="batch size per GPU")
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--warmup_epochs", type=int, default=20, help="epochs to warmup learning rate")
     parser.add_argument("--data_norm",type=str,default="standard",choices=["standard", "min-max", "l2-norm"])
     parser.add_argument("--train_time", type=int, default=1)
@@ -46,10 +49,9 @@ def get_args_parser():
     parser.add_argument("--weight_decay", type=float,default=0,help="Initial value of the weight decay. (default: 0)")
 
     parser.add_argument("--lr",type=float, default=None,metavar="LR",help="learning rate (absolute lr)")
-
     # data loader and logger
     parser.add_argument("--dataset",type=str,default="LandUse21",choices=["LandUse21","Scene15",],)
-    parser.add_argument("--data_path", type=str, default="../../Datasets/Multi_View/", help="path to your folder of dataset")
+    parser.add_argument("--data_path", type=str, default="../Datasets/Multi_View/", help="path to your folder of dataset")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--output_dir",type=str,default="./",help="path where to save, empty for no saving",)
 
@@ -63,14 +65,12 @@ def get_args_parser():
     parser.set_defaults(pin_mem=True)
 
     parser.add_argument("--fp_ratio", type=float, default=0.0)
-    parser.add_argument("--noise_ratio", type=float, default=0.0)
-    parser.add_argument("--missing_rate", type=float, default=0.0)
+    parser.add_argument("--noise_ratio", type=float, default=0.5)
+    parser.add_argument("--missing_rate", type=float, default=0.5)
     parser.add_argument("--divide", action="store_true")
     parser.add_argument("--candy", action="store_true")
     parser.add_argument("--save_ckpt", action="store_true")
-
     parser.add_argument("--singular_thresh", type=float, default=0.2)
-
     return parser
 
 
@@ -88,25 +88,25 @@ def train_one_time(args, state_logger):
 
     # models
     if args.divide:
-        model = DivideModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
+        model = DivideModel(n_views=args.n_views,layer_dims=args.encoder_dim,n_classes=args.n_classes,drop_rate=args.drop_rate, args=args)
     elif args.candy:
-        model = CandyModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
+        model = CandyModel(n_views=args.n_views,layer_dims=args.encoder_dim,n_classes=args.n_classes,drop_rate=args.drop_rate, args=args)
     else:
-        model = NoisyModel(n_views=args.n_views,layer_dims=args.encoder_dim,temperature=args.temperature,n_classes=args.n_classes,drop_rate=args.drop_rate)
+        model = NoisyModel(n_views=args.n_views,layer_dims=args.encoder_dim,n_classes=args.n_classes,drop_rate=args.drop_rate, args=args)
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
 
-    if args.train_id == 0:
-        print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
-        state_logger.write("Batch size: {}".format(args.batch_size))
-        state_logger.write(
-            "Start time: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
-        )
-        state_logger.write("Train parameters: {}".format(args).replace(", ", ",\n"))
-        state_logger.write(model.__repr__())
-        state_logger.write(optimizer.__repr__())
-        print("Data loaded: there are {:} samples.".format(len(dataset)))
+    # if args.train_id == 0:
+    #     print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
+    #     state_logger.write("Batch size: {}".format(args.batch_size))
+    #     state_logger.write(
+    #         "Start time: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+    #     )
+    #     state_logger.write("Train parameters: {}".format(args).replace(", ", ",\n"))
+    #     state_logger.write(model.__repr__())
+    #     state_logger.write(optimizer.__repr__())
+    #     print("Data loaded: there are {:} samples.".format(len(dataset)))
 
     state_logger.write(
         "\n>> Start training {}-th initial, seed: {},".format(args.train_id, args.seed)
@@ -117,29 +117,40 @@ def train_one_time(args, state_logger):
     best_acc = 0.
     for epoch in range(args.start_epoch, args.epochs):
         args.print_this_epoch = (epoch + 1) % args.print_freq == 0 or epoch + 1 == args.epochs
-        train_one_epoch(model,data_loader_train,optimizer,device,epoch,args)
-        eval_result = evaluate(model, data_loader_test, device, args)
+        training_log = train_one_epoch(model,data_loader_train,optimizer,device,epoch,args)
+        eval_result = evaluate(epoch, model, data_loader_test, device, args)
 
         if args.print_this_epoch:
             train_state_dict[epoch] = eval_result
 
-        if args.save_ckpt:
-            torch.save(model, os.path.join(args.output_dir, f"checkpoint_{epoch}"))
         if args.print_this_epoch:
             state_logger.write(
-                "Epoch {} K-means: NMI = {:.4f} ARI = {:.4f} F = {:.4f} ACC = {:.4f}".format(
+                "Epoch {} K-means: ACC = {:.4f} NMI = {:.4f} ARI = {:.4f}".format(
                     epoch,
+                    eval_result["acc"],
                     eval_result["nmi"],
                     eval_result["ari"],
-                    eval_result["f"],
-                    eval_result["acc"],
                 )
             )
+
+        # # csv
+        # with open(result_path, 'a+') as csvfile:
+        #     writer = csv.writer(csvfile)
+        #     if not (os.path.exists(result_path) and os.path.getsize(result_path) > 0):
+        #         writer.writerow(list(training_log.keys()) + list(eval_result.keys()))
+        #     writer.writerow(list(training_log.values()) + list(eval_result.values()))
 
         if eval_result["acc"] > best_acc:
             best_acc = eval_result["acc"]
             best_result = eval_result
     print(best_result)
+
+    # best_file = os.path.join(args.output_dir, 'results_con.csv')
+    # with open(best_file, 'a+') as csvfile:
+    #     writer = csv.writer(csvfile)
+    #     if not (os.path.exists(best_file) and os.path.getsize(best_file) > 0):
+    #         writer.writerow(['con_temperature', 'dist_temperature'] + list(best_result.keys()))
+    #     writer.writerow([args.con_temperature, args.dist_temperature] + list(best_result.values()))
     return train_state_dict
 
 
@@ -201,25 +212,15 @@ if __name__ == "__main__":
         args.update(configs)
         args = argparse.Namespace(**args)
 
-    folder_name = "_".join(
-        [
-            args.dataset,
-            "msrt",
-            str(args.missing_rate),
-            "tau",
-            str(args.temperature),
-            "bs",
-            str(args.batch_size),
-            "blr",
-            str(args.blr),
-        ]
-    )
-
-    args.output_dir = os.path.join(args.output_dir, folder_name)
-    print(f"Output dir: {args.output_dir}")
-
     args.embed_dim = args.encoder_dim[0][-1]
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    Path(os.path.join(args.output_dir, "visualize")).mkdir(parents=True, exist_ok=True)
 
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # for args.noise_ratio in [0.0, 0.2, 0.5, 0.8]:
+    #     args.missing_rate = args.noise_ratio
+    # for args.sigma in [1.0, 0.5, 0.1, 0.05, 0.01]:
+    # for args.con_temperature in [0.05, 0.1, 0.5, 1.0]:
+    #     for args.dist_temperature in [0.1, 0.5, 1.0, 2.0]:
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    result_path = os.path.join(args.output_dir, f"result_{time_str}.csv")
     main(args)

@@ -1,4 +1,4 @@
 __pycache__
-.idea
-./output
+.idea/
+output/
 log_train.txt

@@ -1,17 +1,15 @@
 import random
-
-import numpy as np
 import torch
+import numpy as np
 from torch.backends import cudnn
-
 from sklearn import metrics
 from munkres import Munkres
 import datetime
 import time
 from collections import defaultdict, deque
-
-import torch
-import torch.distributed as dist
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+from itertools import cycle
 
 
 def fix_random_seeds(seed=None):
@@ -267,3 +265,27 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+def tsne_plot(embeddings, labels, file_path='./'):
+    n_clusters = len(np.unique(labels))
+    tsne = TSNE(n_components=2, random_state=0)
+    X_2d = tsne.fit_transform(embeddings)
+
+    plt.figure(figsize=(5,5))
+    # colors = plt.cm.rainbow(np.linspace(0, 1, n_clusters))
+    # tab_colors = list(plt.cm.tab20.colors + plt.cm.tab20b.colors + plt.cm.tab20c.colors)
+    # colors = cycle(tab_colors)
+    import seaborn as sns
+    palette = sns.color_palette("husl", n_clusters)
+
+    # for i in range(n_clusters):
+    #     plt.scatter(X_2d[labels==i, 0], X_2d[labels==i, 1], s=2, color=colors[i], label=str(i), rasterized=True)
+    # for i, color in zip(range(n_clusters), colors):
+    #     plt.scatter(X_2d[labels == i, 0], X_2d[labels == i, 1], s=1, color=color, label=str(i), rasterized=True)
+    for i in range(n_clusters):
+        plt.scatter(X_2d[labels == i, 0], X_2d[labels == i, 1], s=1, color=palette[i], label=str(i), rasterized=True)
+    ax = plt.gca()
+    ax.get_xaxis().set_visible(False)
+    ax.get_yaxis().set_visible(False)
+    ax.axis('off')
+    plt.savefig(file_path, bbox_inches='tight', pad_inches=0.)

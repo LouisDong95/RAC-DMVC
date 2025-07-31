@@ -24,16 +24,14 @@ def load_mat(args):
         label_y = np.squeeze(mat["Y"]).astype("int")
     elif args.dataset == "Reuters":
         mat = sio.loadmat(os.path.join(args.data_path, "Reuters_dim10.mat"))
-        data_X = []  # 18758 samples
         data_X.append(np.vstack((mat["x_train"][0], mat["x_test"][0])))
         data_X.append(np.vstack((mat["x_train"][1], mat["x_test"][1])))
         label_y = np.squeeze(np.hstack((mat["y_train"], mat["y_test"])))
     elif args.dataset == "Caltech101":
-        mat = sio.loadmat(os.path.join(args.data_path, "caltech101.mat"))
+        mat = sio.loadmat(os.path.join(args.data_path, "Caltech101.mat"))
         X = mat["X"][0]
         data_X.append(X[0].T)
         data_X.append(X[1].T)
-        print(X[0].shape, X[1].shape)
         label_y = np.squeeze(mat["gt"]) - 1
     elif args.dataset == "NUSWIDE":
         mat = sio.loadmat(os.path.join(args.data_path, "nuswide_deep_2_view.mat"))
@@ -44,13 +42,7 @@ def load_mat(args):
         raise KeyError(f"Unknown Dataset {args.dataset}")
 
     args.n_sample = data_X[0].shape[0]
-    # add noise
-    if args.noise_ratio > 0:
-        n_ones = int(args.n_sample * args.noise_ratio)
-        mask = np.array([1] * n_ones + [0] * (args.n_sample - n_ones)).reshape(-1,1)
-        np.random.shuffle(mask)
-        noise = np.random.randn(*data_X[1].shape)
-        data_X[1] += noise * mask
+    data_noise, noise_indices = add_non_overlapping_noise(data_X, noise_ratio=args.noise_ratio)
 
     if args.data_norm == "standard":
         for i in range(args.n_views):
@@ -61,58 +53,37 @@ def load_mat(args):
     elif args.data_norm == "min-max":
         for i in range(args.n_views):
             data_X[i] = skp.minmax_scale(data_X[i])
-    return data_X, label_y
+    return data_X, label_y, data_noise, noise_indices
 
 
 def load_dataset(args):
-    data, targets = load_mat(args)
-    dataset = IncompleteMultiviewDataset(args.n_views, data, targets, args.missing_rate)
+    data_ori, targets, data_noise, noise_indices = load_mat(args)
+    dataset = IncompleteMultiviewDataset(args.n_views, data_ori, data_noise, targets, args.missing_rate, noise_indices)
     return dataset
 
 
-class MultiviewDataset(Dataset):
-    def __init__(self, n_views, data_X, label1, label2, id1, id2):
-        super(MultiviewDataset, self).__init__()
-        self.n_views = n_views
-        self.data = data_X
-        self.label1 = label1 - np.min(label1)
-        self.label2 = label2 - np.min(label2)
-        self.id1 = id1
-        self.id2 = id2
-
-    def __len__(self):
-        return self.data[0].shape[0]
-
-    def __getitem__(self, idx):
-        data = []
-        for i in range(self.n_views):
-            data.append(torch.tensor(self.data[i][idx].astype("float32")))
-        label1 = torch.tensor(self.label1[idx], dtype=torch.long)
-        label2 = torch.tensor(self.label2[idx], dtype=torch.long)
-        id1 = torch.tensor(self.id1[idx], dtype=torch.long)
-        id2 = torch.tensor(self.id2[idx], dtype=torch.long)
-        return idx, data, label1, label2, id1, id2
-
-
 class IncompleteMultiviewDataset(Dataset):
-    def __init__(self, n_views, data_X, label_y, missing_rate):
+    def __init__(self, n_views, data_ori, data_noise, label_y, missing_rate, noise_indices):
         super(IncompleteMultiviewDataset, self).__init__()
         self.n_views = n_views
-        self.data = data_X
+        self.data_ori = data_ori
+        self.data_noise = data_noise
         self.targets = label_y - np.min(label_y)
-
-        self.missing_mask = torch.from_numpy(self._get_mask(n_views, self.data[0].shape[0], missing_rate)).bool()
+        self.missing_mask = torch.from_numpy(self._get_mask(n_views, self.data_ori[0].shape[0], missing_rate)).bool()
+        self.noise_indices = noise_indices
 
     def __len__(self):
-        return self.data[0].shape[0]
+        return self.data_ori[0].shape[0]
 
     def __getitem__(self, idx):
-        data = []
+        data_ori = []
+        data_noise = []
         for i in range(self.n_views):
-            data.append(torch.tensor(self.data[i][idx].astype('float32')))
+            data_ori.append(torch.tensor(self.data_ori[i][idx].astype('float32')))
+            data_noise.append(torch.tensor(self.data_noise[i][idx].astype('float32')))
         label = torch.tensor(self.targets[idx], dtype=torch.long)
         mask = self.missing_mask[idx]
-        return idx, data, mask, label
+        return idx, data_ori, data_noise, mask, label, self.noise_indices
 
     @staticmethod
     def _get_mask(view_num, alldata_len, missing_rate):
@@ -188,3 +159,37 @@ class IncompleteDatasetSampler:
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch
+
+def add_non_overlapping_noise(data_list, noise_ratio):
+    """
+    给多个视图数据加不重叠的噪声
+    Args:
+        data_list: list of ndarray，每个元素 shape=(n_samples, n_features)
+        noise_ratio: float，噪声比例，总加噪样本 = ratio * n_samples
+    Returns:
+        noisy_data_list: 加噪后的数据列表
+        noise_indices_list: 每个视图被加噪的索引列表
+    """
+    n_views = len(data_list)
+    n_samples = data_list[0].shape[0]
+    n_noisy_samples = int(n_samples * noise_ratio)
+
+    # assert n_noisy_samples % n_views == 0, "请确保噪声比例能被视图数整除"
+    n_per_view = n_noisy_samples // n_views
+
+    # 打乱并分配索引
+    all_indices = np.arange(n_samples)
+    np.random.shuffle(all_indices)
+
+    noise_indices_list = []
+    noisy_data_list = [data.copy() for data in data_list]
+
+    for i in range(n_views):
+        indices = all_indices[i * n_per_view: (i + 1) * n_per_view]
+        noise = np.random.randn(*data_list[i].shape)
+        mask = np.zeros((n_samples, 1))
+        mask[indices] = 1
+        noisy_data_list[i] += noise * mask
+        noise_indices_list.append(indices.tolist())
+
+    return noisy_data_list, noise_indices_list

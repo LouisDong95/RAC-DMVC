@@ -7,10 +7,11 @@ from sklearn.cluster import KMeans
 
 
 class BaseModel(torch.nn.Module):
-    def __init__(self, n_views, layer_dims, temperature, n_classes, drop_rate=0.5):
+    def __init__(self, n_views, layer_dims, n_classes, drop_rate=0.5, args=None):
         super(BaseModel, self).__init__()
         self.n_views = n_views
         self.n_classes = n_classes
+        self.sigma = args.sigma
 
         self.online_encoder = nn.ModuleList([FCN(layer_dims[i], drop_out=drop_rate) for i in range(n_views)])
         self.online_decoder = nn.ModuleList([FCNDecoder(dim_layer=layer_dims[i][::-1], drop_out=drop_rate) for i in range(n_views)])
@@ -19,9 +20,9 @@ class BaseModel(torch.nn.Module):
         self.clustering_layer = nn.ModuleList([Classifier(n_classes, layer_dims[i][-1]) for i in range(n_views)])
         self._initialize_target_encoders()
 
-        self.cl = ContrastiveLoss(temperature)
-        self.ncl = DenoiseContrastiveLoss(temperature)
-        self.dist = DistillLoss()
+        self.cl = ContrastiveLoss(args.con_temperature)
+        self.ncl = DenoiseContrastiveLoss(args.con_temperature)
+        self.dist = DistillLoss(args.dist_temperature)
         self.feature_dim = [layer_dims[i][-1] for i in range(n_views)]
 
         self.cluster_centers = None
@@ -44,7 +45,7 @@ class BaseModel(torch.nn.Module):
                 param_t.data = param_t.data * momentum + param_o.data * (1 - momentum)
 
     @torch.no_grad()
-    def extract_feature(self, data, mask, realign=True):
+    def extract_feature(self, data, mask, realign=False):
         N = data[0].shape[0]
         z = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
 
@@ -69,6 +70,7 @@ class BaseModel(torch.nn.Module):
     def update_cluster_centers(self, data, labels):
         with torch.no_grad():
             target_features = [encoder(view) for encoder, view in zip(self.target_encoder, data)]
+            # fused_features = F.normalize(torch.stack(target_features, dim=0).sum(dim=0)/2)
             fused_features = F.normalize(torch.cat(target_features, dim=1), dim=1)
             kmeans = KMeans(n_clusters=self.n_classes, random_state=42, n_init=10)
             cluster_labels = kmeans.fit_predict(fused_features.cpu().numpy())
@@ -98,10 +100,10 @@ class DivideModel(BaseModel):
         G = torch.eye(G.shape[0]).cuda() * alpha + G * (1 - alpha)
         return G
 
-    def forward_impl(self, data, warm_up, singular_thresh):
-        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
+    def forward_impl(self, data_ori, data_noise, warm_up, singular_thresh):
+        z = [self.online_encoder[i](data_noise[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
-        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
+        z_t = [self.target_encoder[i](data_noise[i]) for i in range(self.n_views)]
 
         if warm_up:
             mp = torch.eye(z[0].shape[0]).cuda()
@@ -139,10 +141,10 @@ class CandyModel(BaseModel):
 
         return G_intra, G_inter
 
-    def forward_impl(self, data, warm_up, singular_thresh):
-        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
+    def forward_impl(self, data_ori, data_noise, warm_up, singular_thresh):
+        z = [self.online_encoder[i](data_noise[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
-        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
+        z_t = [self.target_encoder[i](data_noise[i]) for i in range(self.n_views)]
 
         if warm_up:
             mp_intra = torch.eye(z[0].shape[0]).cuda()
@@ -202,11 +204,11 @@ class NoisyModel(BaseModel):
         return G_intra, G_inter
 
 
-    def forward_impl(self, data, warm_up, singular_thresh):
-        z = [self.online_encoder[i](data[i]) for i in range(self.n_views)]
-        z_r = [self.online_decoder[1-i](z[i]) for i in range(self.n_views)]
+    def forward_impl(self, data_ori, data_noise, warm_up, singular_thresh):
+        z = [self.online_encoder[i](data_noise[i]) for i in range(self.n_views)]
+        x_r = [self.online_decoder[1-i](z[i]) for i in range(self.n_views)]
         p = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
-        z_t = [self.target_encoder[i](data[i]) for i in range(self.n_views)]
+        z_t = [self.target_encoder[i](data_noise[i]) for i in range(self.n_views)]
 
         if warm_up:
             mp_intra = torch.eye(z[0].shape[0]).cuda()
@@ -214,13 +216,15 @@ class NoisyModel(BaseModel):
             mp_inter = mp_intra
             l_dist = torch.tensor(0.0).cuda()
         else:
-            mp_intra, mp_inter = self.robust_affinity(p, z_t)
+            mp_intra, mp_inter = self.robust_affinity(p, z_t, self.sigma)
             logit_p = [self.clustering_layer[i](p[i]) for i in range(self.n_views)]
             l_dist = (self.dist(logit_p[0], z_t, self.cluster_centers) + self.dist(logit_p[1], z_t, self.cluster_centers))/2
-            # l_dist = torch.tensor(0.0).cuda()
 
-        l_rec = (F.mse_loss(data[0], z_r[1], reduction='mean') + F.mse_loss(data[1], z_r[0], reduction='mean'))
-        # l_rec = torch.tensor(0.0).cuda()
+        l_rec = (F.mse_loss(data_ori[0], x_r[1], reduction='mean') + F.mse_loss(data_ori[1], x_r[0], reduction='mean')) / 2
+        # l_rec = (F.mse_loss(data[0], x_r[0], reduction='mean') + F.mse_loss(data[1], x_r[1], reduction='mean'))/2
+        # l_intra = (self.cl(z[0], z_t[0]) + self.cl(z[1], z_t[1])) / 2
+        # l_inter = (self.cl(p[0], z_t[1]) + self.cl(p[1], z_t[0])) / 2
+
         l_intra = (self.cl.noisy_contrastive(z[0], z_t[0], mp_intra[0]) + self.cl.noisy_contrastive(z[1], z_t[1], mp_intra[1])) / 2
         l_inter = (self.cl.noisy_contrastive(p[0], z_t[1], mp_inter[0]) + self.cl.noisy_contrastive(p[1], z_t[0], mp_inter[1])) / 2
 
@@ -234,9 +238,9 @@ class NoisyModel(BaseModel):
         for i in range(self.n_views):
             z[i][mask[:, i]] = self.target_encoder[i](data[i][mask[:, i]])
 
-        # # prediction
-        # for i in range(self.n_views):
-        #     z[i][~mask[:, i]] = self.cross_view_decoder[1 - i](z[1 - i][~mask[:, i]])
+        # prediction
+        for i in range(self.n_views):
+            z[i][~mask[:, i]] = self.cross_view_decoder[1 - i](z[1 - i][~mask[:, i]])
 
         alpha = 0.5
         for i in range(self.n_views):
@@ -248,25 +252,18 @@ class NoisyModel(BaseModel):
 
             z_miss_query = self.cross_view_decoder[1 - i](z[1 - i][idx_miss])
 
-            attn_cross = self.graph_attention(z_miss_query, z_cross_obs, z_cross_obs)
-            attn_local = self.graph_attention(z_miss_query, z_obs, z_obs)
+            attn_cross = self.graph_attention(z_miss_query, z_cross_obs, z_cross_obs, self.sigma)
+            attn_local = self.graph_attention(z_miss_query, z_obs, z_obs, self.sigma)
 
             z[i][idx_miss] = alpha * attn_cross + (1 - alpha) * attn_local
+        # for i in range(self.n_views):
+        #     sim = self.cross_view_decoder[1 - i](z[1 - i][~mask[:, i]]) @ self.cluster_centers.T
+        #     sim = torch.argmax(sim, dim=1)
+        #     z[i][~mask[:, i]] = self.cluster_centers[sim]
 
         z = [self.cross_view_decoder[i](z[i]) for i in range(self.n_views)]
         z = [F.normalize(z[i]) for i in range(self.n_views)]
         return z
-
-    @torch.no_grad()
-    def kernel(self, p, z, t=0.07, flag=False):
-        p = F.normalize(p)
-        z = F.normalize(z)
-        G = (2 - 2 * (p @ z.t())).clamp(min=0.0)
-        G = torch.exp(-G / t)
-        if flag:
-            G.fill_diagonal_(1.0)
-        G = G / G.sum(1, keepdim=True).clamp_min(1e-7)
-        return G
 
     @torch.no_grad()
     def graph_attention(self, query, key, value, temperature=0.07):
@@ -383,8 +380,8 @@ class ContrastiveLoss(nn.Module):
         similarity = torch.div(torch.matmul(x_q, x_k.T), self.temperature)
         similarity = -torch.log(torch.softmax(similarity, dim=1))
         nll_loss = similarity * mask_pos / mask_pos.sum(dim=1, keepdim=True)
-        # loss = nll_loss.sum() / N
-        loss = nll_loss.mean()
+        loss = nll_loss.sum() / N
+        # loss = nll_loss.mean()
         return loss
 
     def noisy_contrastive(self, x_q, x_k, mask_pos=None):
@@ -424,8 +421,8 @@ class DenoiseContrastiveLoss(nn.Module):
         loss = denoise_contrastive_loss(
             x_q, x_k, mask_pos, self.temperature, association, singular_thresh
         )
-
-        return loss/N
+        loss = loss.sum()/N
+        return loss
 
 
 def denoise_contrastive_loss(query,key,mask_pos,temperature,association,singular_thresh,):
@@ -446,10 +443,8 @@ def denoise_contrastive_loss(query,key,mask_pos,temperature,association,singular
     L = L / L.sum(dim=1, keepdim=True).clamp_min(1e-7)
 
     nll_loss = L * logp
-
-    loss = nll_loss.mean()
-    # loss = nll_loss.sum()
-    return loss
+    # nll_loss = nll_loss.mean()
+    return nll_loss
 
 
 class DistillLoss(nn.Module):
