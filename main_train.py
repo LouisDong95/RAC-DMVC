@@ -51,7 +51,7 @@ def get_args_parser():
     parser.add_argument("--lr",type=float, default=None,metavar="LR",help="learning rate (absolute lr)")
     # data loader and logger
     parser.add_argument("--dataset",type=str,default="LandUse21",choices=["LandUse21","Scene15",],)
-    parser.add_argument("--data_path", type=str, default="../Datasets/Multi_View/", help="path to your folder of dataset")
+    parser.add_argument("--data_path", type=str, default="../../Datasets/Multi_View/", help="path to your folder of dataset")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--output_dir",type=str,default="./",help="path where to save, empty for no saving",)
 
@@ -96,17 +96,6 @@ def train_one_time(args, state_logger):
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.99))
-
-    # if args.train_id == 0:
-    #     print("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
-    #     state_logger.write("Batch size: {}".format(args.batch_size))
-    #     state_logger.write(
-    #         "Start time: {}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
-    #     )
-    #     state_logger.write("Train parameters: {}".format(args).replace(", ", ",\n"))
-    #     state_logger.write(model.__repr__())
-    #     state_logger.write(optimizer.__repr__())
-    #     print("Data loaded: there are {:} samples.".format(len(dataset)))
 
     state_logger.write(
         "\n>> Start training {}-th initial, seed: {},".format(args.train_id, args.seed)
@@ -216,11 +205,6 @@ if __name__ == "__main__":
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # for args.noise_ratio in [0.0, 0.2, 0.5, 0.8]:
-    #     args.missing_rate = args.noise_ratio
-    # for args.sigma in [1.0, 0.5, 0.1, 0.05, 0.01]:
-    # for args.con_temperature in [0.05, 0.1, 0.5, 1.0]:
-    #     for args.dist_temperature in [0.1, 0.5, 1.0, 2.0]:
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     result_path = os.path.join(args.output_dir, f"result_{time_str}.csv")
     main(args)

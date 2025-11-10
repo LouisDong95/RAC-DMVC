@@ -221,10 +221,6 @@ class NoisyModel(BaseModel):
             l_dist = (self.dist(logit_p[0], z_t, self.cluster_centers) + self.dist(logit_p[1], z_t, self.cluster_centers))/2
 
         l_rec = (F.mse_loss(data_ori[0], x_r[1], reduction='mean') + F.mse_loss(data_ori[1], x_r[0], reduction='mean')) / 2
-        # l_rec = (F.mse_loss(data[0], x_r[0], reduction='mean') + F.mse_loss(data[1], x_r[1], reduction='mean'))/2
-        # l_intra = (self.cl(z[0], z_t[0]) + self.cl(z[1], z_t[1])) / 2
-        # l_inter = (self.cl(p[0], z_t[1]) + self.cl(p[1], z_t[0])) / 2
-
         l_intra = (self.cl.noisy_contrastive(z[0], z_t[0], mp_intra[0]) + self.cl.noisy_contrastive(z[1], z_t[1], mp_intra[1])) / 2
         l_inter = (self.cl.noisy_contrastive(p[0], z_t[1], mp_inter[0]) + self.cl.noisy_contrastive(p[1], z_t[0], mp_inter[1])) / 2
 
