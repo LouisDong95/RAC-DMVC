@@ -12,10 +12,21 @@ python main_train.py --config_file config/Scene15.yaml
 ## Cite
 If you find the code useful in your research, please consider citing our paper:
 ```
-@inproceedings{DBLP:conf/AAAI/DongAAAI26,
-      title={RAC-DMVC: Reliability-Aware Contrastive Deep Multi-View Clustering under Multi-Source Noise}, 
-      author={Shihao Dong and Yue Liu and Xiaotong Zhou and Yuhui Zheng and Huiying Xu and Xinzhong Zhu},
-      booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
-      year={2026}
+@inproceedings{DBLP:conf/aaai/DongLZZXZ26,
+  author       = {Shihao Dong and
+                  Yue Liu and
+                  Xiaotong Zhou and
+                  Yuhui Zheng and
+                  Huiying Xu and
+                  Xinzhong Zhu},
+  title        = {{RAC-DMVC:} Reliability-Aware Contrastive Deep Multi-View Clustering
+                  Under Multi-Source Noise},
+  booktitle    = {Fortieth {AAAI} Conference on Artificial Intelligence, Thirty-Eighth
+                  Conference on Innovative Applications of Artificial Intelligence,
+                  Sixteenth Symposium on Educational Advances in Artificial Intelligence,
+                  {AAAI} 2026, Singapore, January 20-27, 2026},
+  pages        = {20835--20843},
+  publisher    = {{AAAI} Press},
+  year         = {2026}
 }
 ```
